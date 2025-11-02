@@ -1,3 +1,8 @@
+<<<<<<< HEAD
 streamlit
 requests
+=======
+streamlit
+requests
+>>>>>>> fde5cbaf2d4b121dad293461aab77ab9d57d7653
 numpy
