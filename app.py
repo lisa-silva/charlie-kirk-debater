@@ -14,8 +14,12 @@ st.set_page_config(
 )
 
 # --- Constants ---
-# Use the correct key structure: st.secrets.<section>.<key>
-API_KEY = st.secrets.tool_auth.gemini_api_key
+API_KEY = st.secrets["tool_auth"]["gemini_api_key"]
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta2/models/gemini-2.5-flash-preview-tts:generateContent"
+
+API_KEY = st.secrets["tool_auth"]["AIzaSyDNB-9Z\_Liw2CeFwB-TnkBrplPeBP\_HEPc"]
+[tool_auth]
+gemini_api_key = "AIzaSyDNB-9Z\_Liw2CeFwB-TnkBrplPeBP\_HEPc"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
 
 # --- Audio Utility Function (PCM to WAV) ---
