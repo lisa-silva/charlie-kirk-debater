@@ -13,9 +13,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Constants ---
-# Use the correct key structure: st.secrets.<section>.<key>
-API_KEY = st.secrets.tool_auth.gemini_api_key, ("AIzaSyDpKpfNr8jTL5V9uGqERerXNEym4_Iy6iU")
+
+# Use the correct key structure: st.secrets.<section>.<key>             
+API_KEY = st.secrets.gemini.api_key  # <-- CHANGE THIS LINE
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
 
 # --- Audio Utility Function (PCM to WAV) ---
