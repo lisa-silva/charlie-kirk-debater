@@ -1,192 +1,148 @@
-import base64
 import streamlit as st
 import requests
+import base64
 import numpy as np
 import io
-import time
-import json
+import wave
+import struct
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="Vocal Premise Debater",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
+# --- Helper Functions for Audio Processing ---
 
+def base64_to_array_buffer(base64_string):
+    """Converts a base64 string to a byte buffer."""
+    try:
+        return base64.b64decode(base64_string)
+    except Exception as e:
+        st.error(f"Error decoding base64 string: {e}")
+        return None
 
-# Use the correct key structure: st.secrets.<section>.<key>             
-API_KEY = st.secrets.gemini.api_key  # <-- CHANGE THIS LINE
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
-
-# --- Audio Utility Function (PCM to WAV) ---
-def pcm_to_wav(pcm_data, sample_rate=24000):
-    """Converts raw 16-bit signed PCM audio data to a WAV file byte array."""
-    
-    # API returns 16-bit signed linear PCM.
-    pcm16 = np.frombuffer(pcm_data, dtype=np.int16)
-    
-    # 44-byte WAV header size
-    buffer = np.zeros(44 + pcm16.size * 2, dtype=np.uint8) 
-
-    # --- RIFF Chunk ---
-    buffer[0:4] = b'RIFF'  # ChunkID
-    buffer[4:8] = np.uint32(36 + pcm16.size * 2).tobytes() # ChunkSize
-    buffer[8:12] = b'WAVE' # Format
-    
-    # --- FMT Chunk ---
-    buffer[12:16] = b'fmt ' # Subchunk1ID
-    buffer[16:20] = np.uint32(16).tobytes() # Subchunk1Size (16 for PCM)
-    buffer[20:22] = np.uint16(1).tobytes() # AudioFormat (1 for PCM)
-    buffer[22:24] = np.uint16(1).tobytes() # NumChannels (Mono)
-    buffer[24:28] = np.uint32(sample_rate).tobytes() # SampleRate
-    buffer[28:32] = np.uint32(sample_rate * 2).tobytes() # ByteRate (SampleRate * NumChannels * BitsPerSample/8)
-    buffer[32:34] = np.uint16(2).tobytes() # BlockAlign (NumChannels * BitsPerSample/8)
-    buffer[34:36] = np.uint16(16).tobytes() # BitsPerSample
-    
-    # --- Data Chunk ---
-    buffer[36:40] = b'data' # Subchunk2ID
-    buffer[40:44] = np.uint32(pcm16.size * 2).tobytes() # Subchunk2Size
-    
-    # Copy PCM data after header
-    buffer[44:] = pcm16.tobytes()
-    
-    return io.BytesIO(buffer.tobytes())
-
-
-# --- API Interaction Functions ---
-
-@st.cache_data
-def generate_tts_audio(text_to_speak, voice_name="Kore"):
-    """Calls the TTS API and returns a WAV file byte stream."""
-    st.info("Generating audio response...", icon="🔊")
-    
-    headers = {
-        'Content-Type': 'application/json',
-    }
-
-    payload = {
-        "contents": [{
-            "parts": [{ "text": text_to_speak }]
-        }],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": { "voiceName": voice_name }
-                }
-            }
-        },
-        "model": "gemini-2.5-flash-preview-tts"
-    }
-
-    # API call with Exponential Backoff
-    for i in range(3): 
-        try:
-            response = requests.post(f"{GEMINI_API_URL}?key={API_KEY}", headers=headers, data=json.dumps(payload))
-            response.raise_for_status()
-
-            result = response.json()
+def pcm_to_wav(pcm_data, sample_rate, channels=1, sample_width=2):
+    """Converts raw PCM data to a WAV byte buffer."""
+    if not pcm_data:
+        return None
+        
+    # The API returns signed 16-bit PCM data
+    try:
+        pcm16 = np.frombuffer(pcm_data, dtype=np.int16)
+        
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width) # 2 bytes = 16 bits
+            wav_file.setframerate(sample_rate)
             
-            candidate = result.get('candidates', [{}])[0]
-            part = candidate.get('content', {}).get('parts', [{}])[0]
-            
-            if part and part.get('inlineData'):
-                audio_data_base64 = part['inlineData']['data']
-                audio_data_bytes = io.BytesIO(base64.b64decode(audio_data_base64)).read()
+            # Pack the PCM data into binary format
+            for sample in pcm16:
+                wav_file.writeframes(struct.pack('<h', sample))
                 
-                # Convert raw PCM audio data to WAV format
-                wav_file = pcm_to_wav(audio_data_bytes)
-                return wav_file
-            
-            st.error("Error: TTS response did not contain valid audio data.")
-            return None
+        wav_buffer.seek(0)
+        return wav_buffer.read()
+        
+    except Exception as e:
+        st.error(f"Error converting PCM to WAV: {e}")
+        st.text("PCM Data Length (bytes): " + str(len(pcm_data)))
+        return None
 
-        except requests.exceptions.RequestException as e:
-            if i < 2:
-                st.warning(f"API call failed, retrying in {2**i}s... Error: {e}")
-                time.sleep(2**i)
-            else:
-                st.error(f"Final API call failed after retries: {e}")
-                return None
-        except Exception as e:
-            st.error(f"An unexpected error occurred during audio generation: {e}")
-            return None
-    return None
+# --- Main App ---
 
-@st.cache_data
-def generate_debate_response(premise, persona="Charlie Kirk"):
-    """Calls the Gemini API to generate the debate response."""
-    
-    system_prompt = f"""You are a vocal debater known for {persona}'s style. 
-    Analyze the user's premise. Then, provide a short (2-3 sentence), highly confident, and direct counter-argument or defense of the opposite position, written in the voice of {persona}. 
-    Conclude your response with a summary statement.
-    """
-    
-    user_query = f"Analyze and respond to this premise: '{premise}'"
+st.set_page_config(layout="centered", page_title="Charlie Kirk Debater")
+st.title("🎙️ Charlie Kirk Debater App")
+st.write("Enter text and I'll generate an audio clip in a firm, informative debater style. (Powered by Gemini TTS)")
 
-    # API call with Exponential Backoff
-    for i in range(3): 
-        try:
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}",
-                headers={'Content-Type': 'application/json'},
-                data=json.dumps({
-                    "contents": [{"parts": [{"text": user_query}]}],
-                    "systemInstruction": {"parts": [{"text": system_prompt}]},
-                    "tools": [{"google_search": {}}]
-                })
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            return result['candidates'][0]['content']['parts'][0]['text']
+# --- API Configuration ---
 
-        except requests.exceptions.RequestException as e:
-            if i < 2:
-                st.warning(f"Text generation failed, retrying in {2**i}s... Error: {e}")
-                time.sleep(2**i)
-            else:
-                st.error(f"Final text generation failed after retries: {e}")
-                return "The debate generator failed to connect to the API."
-        except Exception as e:
-            st.error(f"An unexpected error occurred during debate generation: {e}")
-            return "An unexpected error occurred."
-    return "The debate generator failed."
+# Correct: API key is retrieved from Streamlit secrets
+# The user must set this key in their Streamlit Cloud settings.
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    st.error("GEMINI_API_KEY not found in Streamlit secrets. Please add it.")
+    API_KEY = None # App will fail gracefully
 
+# Model is specified in the URL, not the payload
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
 
-# --- Main Streamlit UI ---
+# --- User Input ---
 
-st.title("🗣️ Vocal Premise Debater")
-st.markdown("Enter a premise, and receive a counter-argument in the style of Charlie Kirk, complete with generated audio.")
-
-# Input
-premise = st.text_area(
-    "Enter your premise (e.g., 'The voting age should be lowered to 16.')",
-    max_chars=200,
-    height=100
+text_prompt = st.text_area(
+    "Enter text to synthesize:", 
+    "Let's be very clear, the fundamental argument here is about freedom, and the facts simply don't support the opposing narrative.",
+    height=150
 )
 
-if st.button("Generate Debate", type="primary") and premise:
-    if not API_KEY:
-        st.error("API Key not found. Please ensure `gemini_api_key` is set in your `.streamlit/secrets.toml` file.")
-    else:
-        with st.spinner("Generating counter-argument..."):
-            
-            # 1. Generate Debate Text
-            debate_text = generate_debate_response(premise)
-            
-            # 2. Display Debate Text
-            st.subheader("Charlie Kirk's Response:")
-            st.info(debate_text)
-            
-            # 3. Generate and Display Audio
-            # We use the 'Kore' voice as a good fit for this persona
-            audio_wav_io = generate_tts_audio(debate_text, voice_name="Kore")
-            
-            if audio_wav_io:
-                st.subheader("Listen to the Argument:")
-                # Streamlit's audio player accepts the raw WAV data
-                st.audio(audio_wav_io.getvalue(), format="audio/wav")
+# Voice configuration (Kore is a good 'firm' voice)
+voice_name = "Kore"
+style_prompt = "Say in a firm, informative, and confident tone, like a political debater:"
 
-elif st.button("Generate Debate", disabled=True):
-    st.warning("Please enter a premise above to start the debate.")
+generate_button = st.button("Generate Audio Clip")
+
+if generate_button and API_KEY:
+    if not text_prompt:
+        st.warning("Please enter some text to generate audio.")
+    else:
+        with st.spinner("Generating audio... this may take a moment."):
+            try:
+                # --- API Call ---
+                
+                # Construct the full prompt for the model
+                full_prompt = f"{style_prompt}\n\n{text_prompt}"
+                
+                # Corrected Payload: No "model" key
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": full_prompt}]
+                    }],
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"],
+                        "speechConfig": {
+                            "voiceConfig": {
+                                "prebuiltVoiceConfig": {"voiceName": voice_name}
+                            }
+                        }
+                    },
+                    # The "model" key is REMOVED from here. It's in the URL.
+                }
+
+                headers = {'Content-Type': 'application/json'}
+
+                # Make the API request
+                response = requests.post(GEMINI_API_URL, headers=headers, json=payload)
+                response.raise_for_status() # Raises an error for bad responses (4xx, 5xx)
+
+                # --- Process Response ---
+                result = response.json()
+                
+                if "candidates" in result and result["candidates"]:
+                    part = result["candidates"][0]["content"]["parts"][0]
+                    
+                    if "inlineData" in part and "data" in part["inlineData"]:
+                        audio_data_base64 = part["inlineData"]["data"]
+                        mime_type = part["inlineData"]["mimeType"] # e.g., "audio/L16;rate=24000"
+                        
+                        # Extract sample rate from mime type
+                        sample_rate = int(mime_type.split("rate=")[-1])
+                        
+                        # Convert PCM to WAV
+                        pcm_data = base64_to_array_buffer(audio_data_base64)
+                        wav_data = pcm_to_wav(pcm_data, sample_rate)
+                        
+                        if wav_data:
+                            st.success("Audio generated successfully!")
+                            st.audio(wav_data, format='audio/wav')
+                        else:
+                            st.error("Failed to convert PCM audio to WAV.")
+                            
+                    else:
+                        st.error("No audio data found in the API response.")
+                else:
+                    st.error("No candidates found in API response.")
+                    st.json(result) # Show the error response
+
+            except requests.exceptions.HTTPError as http_err:
+                st.error(f"HTTP error occurred: {http_err}")
+                st.error(f"Response content: {response.text}")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {e}")
+
+elif generate_button and not API_KEY:
+    st.error("Cannot generate audio. The GEMINI_API_KEY is not set in your Streamlit secrets.")
